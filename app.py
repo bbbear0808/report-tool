@@ -1,13 +1,15 @@
-import streamlit as st
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
 import pandas as pd
-import numpy as np
-from docxtpl import DocxTemplate
-import io
 import os
 import sys
+import io
+from docxtpl import DocxTemplate
 from datetime import datetime
+import threading
+import tempfile
 
-# ---------- 基础函数 ----------
+# ---------- 工具函数 ----------
 def get_base_dir():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
@@ -41,21 +43,17 @@ def process_progress_sheet(df):
 def process_bug_sheet(df, sheet_name):
     bug_level_col = find_column(df, ['bug等级', 'bug级别', '等级', 'level', '严重程度'])
     bug_desc_col = find_column(df, ['bug描述', '问题描述', '描述', 'description'])
-    
     level_series = df[bug_level_col].astype(str).str.strip().str.upper()
     valid_mask = level_series != 'NA'
     df_clean = df[valid_mask].copy()
-    
     total = len(df_clean)
     s_count = int((level_series[valid_mask] == 'S').sum())
     a_count = int((level_series[valid_mask] == 'A').sum())
     b_count = int((level_series[valid_mask] == 'B').sum())
     c_count = int((level_series[valid_mask] == 'C').sum())
-    
     bugs = df_clean[[bug_level_col, bug_desc_col]].copy()
     bugs.columns = ['Bug等级', 'Bug描述']
     bugs_list = bugs.to_dict(orient='records')
-    
     return {
         'sheet_name': sheet_name,
         'total_bugs': total,
@@ -74,241 +72,240 @@ def generate_report(context, template_path):
     output.seek(0)
     return output
 
-# ---------- 页面配置 ----------
-st.set_page_config(
-    page_title="测试报告生成器",
-    page_icon="📄",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
+# ---------- 主窗口 ----------
+class ReportApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("测试报告自动生成工具")
+        self.root.geometry("800x700")
+        self.root.resizable(True, True)
 
-# 隐藏 Streamlit 默认样式，让界面更干净
-st.markdown("""
-<style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    .stApp {margin-top: -50px;}
-    div[data-testid="stExpander"] {border: 1px solid #ddd; border-radius: 10px; margin-bottom: 10px;}
-</style>
-""", unsafe_allow_html=True)
+        self.sheet_names = []
+        self.progress_data = None
+        self.bug_stats = []
+        self.all_sheets = {}
+        self.template_path = None
 
-st.title("📄 测试报告自动生成工具")
+        self.base_dir = get_base_dir()
+        self.default_template = os.path.join(self.base_dir, "template.docx")
 
-base = get_base_dir()
-default_template_path = os.path.join(base, "template.docx")
+        self.create_widgets()
 
-# 初始化 session
-if 'progress_data' not in st.session_state:
-    st.session_state.progress_data = None
-if 'bug_stats' not in st.session_state:
-    st.session_state.bug_stats = []
-if 'sheet_names' not in st.session_state:
-    st.session_state.sheet_names = []
+    def create_widgets(self):
+        # 主框架，带滚动条
+        main_frame = ttk.Frame(self.root, padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
 
-# ==================== 步骤1：上传 Excel ====================
-st.markdown("---")
-st.subheader("📂 步骤1：上传 Excel 数据文件")
+        # 步骤1：上传Excel
+        frame1 = ttk.LabelFrame(main_frame, text="步骤1：上传 Excel 文件", padding=10)
+        frame1.pack(fill=tk.X, pady=5)
 
-uploaded_excel = st.file_uploader(
-    "选择从谷歌表格下载的 .xlsx 文件",
-    type=['xlsx'],
-    help="请先将谷歌表格下载为 Excel 格式（文件 → 下载 → Microsoft Excel）"
-)
+        ttk.Label(frame1, text="Excel 文件：").grid(row=0, column=0, sticky=tk.W)
+        self.excel_path = tk.StringVar()
+        ttk.Entry(frame1, textvariable=self.excel_path, width=50).grid(row=0, column=1, padx=5)
+        ttk.Button(frame1, text="浏览...", command=self.browse_excel).grid(row=0, column=2)
 
-if uploaded_excel:
-    try:
-        xls = pd.ExcelFile(uploaded_excel)
-        st.session_state.sheet_names = xls.sheet_names
-        
-        col_info, col_btn = st.columns([3, 1])
-        with col_info:
-            st.info(f"✅ 已读取 **{len(st.session_state.sheet_names)}** 个页签")
-        
-        progress_sheet = st.selectbox(
-            "📋 请选择“每月更新进度情况”对应的页签",
-            options=st.session_state.sheet_names,
-            index=0 if st.session_state.sheet_names else 0
-        )
-        
-        if st.button("🔍 提取数据", type="primary", use_container_width=True):
-            with st.spinner("正在分析数据..."):
-                all_sheets = {name: pd.read_excel(xls, sheet_name=name) for name in st.session_state.sheet_names}
-                
-                # 处理进度页签
-                df_progress = all_sheets[progress_sheet]
-                st.session_state.progress_data = process_progress_sheet(df_progress)
-                
-                # 处理其他页签
-                bug_stats = []
-                skipped = []
-                for name in st.session_state.sheet_names:
-                    if name == progress_sheet:
-                        continue
-                    try:
-                        stats = process_bug_sheet(all_sheets[name], name)
-                        bug_stats.append(stats)
-                    except Exception as e:
-                        skipped.append(name)
-                
-                st.session_state.bug_stats = bug_stats
-                
-                if bug_stats:
-                    st.success(f"✅ 数据提取完成！成功处理 {len(bug_stats)} 个Bug页签")
-                if skipped:
-                    st.warning(f"⚠️ 跳过了 {len(skipped)} 个页签：{', '.join(skipped)}（缺少必要的Bug等级/描述列）")
-                    
-    except Exception as e:
-        st.error(f"❌ 读取文件出错：{e}")
+        self.sheet_label = ttk.Label(frame1, text="已读取页签：无")
+        self.sheet_label.grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=5)
 
-# 数据预览
-if st.session_state.progress_data:
-    with st.expander("📊 点击查看提取的数据预览"):
-        tab1, tab2 = st.tabs(["进度数据", "Bug统计"])
-        with tab1:
-            df_preview = pd.DataFrame(st.session_state.progress_data)
-            st.dataframe(df_preview, use_container_width=True)
-        with tab2:
-            for stat in st.session_state.bug_stats:
-                cols = st.columns(5)
-                cols[0].metric(f"📌 {stat['sheet_name']}", f"{stat['total_bugs']} 个Bug")
-                cols[1].metric("S级", stat['s_count'])
-                cols[2].metric("A级", stat['a_count'])
-                cols[3].metric("B级", stat['b_count'])
-                cols[4].metric("C级", stat['c_count'])
-                st.divider()
+        ttk.Label(frame1, text="选择进度页签：").grid(row=2, column=0, sticky=tk.W)
+        self.progress_sheet_combo = ttk.Combobox(frame1, state="readonly", width=40)
+        self.progress_sheet_combo.grid(row=2, column=1, padx=5)
+        self.progress_sheet_combo.bind("<<ComboboxSelected>>", lambda e: None)
 
-# ==================== 步骤2：填写报告信息 ====================
-st.markdown("---")
-st.subheader("✍️ 步骤2：填写报告基本信息")
+        ttk.Button(frame1, text="提取数据", command=self.extract_data).grid(row=2, column=2)
 
-# 第一行：基本字段
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    project = st.text_input("📁 项目名称", placeholder="例：XX项目V2.0")
-with col2:
-    version = st.text_input("🏷️ 版本号", placeholder="例：V2.0.1")
-with col3:
-    tester = st.text_input("👤 测试人员", placeholder="例：张三")
-with col4:
-    date = st.date_input("📅 报告日期", value=datetime.now().date())
+        # 进度预览
+        self.progress_text = tk.Text(frame1, height=6, state=tk.DISABLED, wrap=tk.WORD)
+        self.progress_text.grid(row=3, column=0, columnspan=3, pady=5, sticky=tk.EW)
 
-# 第二行：测试环境和类型
-col_env, col_type = st.columns(2)
-with col_env:
-    st.markdown("**🖥️ 测试环境（可多选）**")
-    env_cols = st.columns(4)
-    with env_cols[0]:
-        env_ios = st.checkbox("iOS")
-    with env_cols[1]:
-        env_android = st.checkbox("Android")
-    with env_cols[2]:
-        env_web = st.checkbox("Web")
-    with env_cols[3]:
-        env_harmony = st.checkbox("鸿蒙")
-    
-    # 整理选中的环境
-    selected_envs = []
-    if env_ios: selected_envs.append("iOS")
-    if env_android: selected_envs.append("Android")
-    if env_web: selected_envs.append("Web")
-    if env_harmony: selected_envs.append("鸿蒙")
-    env_str = "、".join(selected_envs) if selected_envs else "未指定"
+        # 步骤2：填写信息
+        frame2 = ttk.LabelFrame(main_frame, text="步骤2：填写报告信息", padding=10)
+        frame2.pack(fill=tk.X, pady=5)
 
-with col_type:
-    test_type = st.radio(
-        "**🧪 测试类型**",
-        options=["功能测试", "集成测试", "回归测试", "验收测试", "性能测试", "其他"],
-        horizontal=True
-    )
+        # 第一行
+        ttk.Label(frame2, text="项目名称：").grid(row=0, column=0, sticky=tk.W)
+        self.project_var = tk.StringVar()
+        ttk.Entry(frame2, textvariable=self.project_var, width=25).grid(row=0, column=1, padx=5)
 
-# 第三行：测试结论
-st.markdown("**📝 测试结论**")
-conclusion = st.text_area(
-    "测试结论",
-    placeholder="请填写测试结论，例如：\n本次测试共发现Bug XX个，其中S级X个、A级X个...\n主要问题集中在登录模块和支付模块...\n建议修复S级和A级Bug后再上线...",
-    height=120,
-    label_visibility="collapsed"
-)
+        ttk.Label(frame2, text="版本号：").grid(row=0, column=2, sticky=tk.W)
+        self.version_var = tk.StringVar()
+        ttk.Entry(frame2, textvariable=self.version_var, width=15).grid(row=0, column=3, padx=5)
 
-# 第四行：备注
-remark = st.text_area(
-    "**⚠️ 备注/遗留风险**",
-    placeholder="如有遗留风险或需要特别说明的事项，请在此填写...",
-    height=80
-)
+        # 第二行
+        ttk.Label(frame2, text="测试人员：").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.tester_var = tk.StringVar()
+        ttk.Entry(frame2, textvariable=self.tester_var, width=25).grid(row=1, column=1, padx=5)
 
-# ==================== 步骤3：生成报告 ====================
-st.markdown("---")
-st.subheader("📃 步骤3：选择模板并生成报告")
+        ttk.Label(frame2, text="日期：").grid(row=1, column=2, sticky=tk.W)
+        self.date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+        ttk.Entry(frame2, textvariable=self.date_var, width=15).grid(row=1, column=3, padx=5)
 
-col_template, col_generate = st.columns([2, 1])
+        # 测试环境
+        ttk.Label(frame2, text="测试环境：").grid(row=2, column=0, sticky=tk.W)
+        env_frame = ttk.Frame(frame2)
+        env_frame.grid(row=2, column=1, columnspan=3, sticky=tk.W)
+        self.env_ios = tk.BooleanVar()
+        self.env_android = tk.BooleanVar()
+        self.env_web = tk.BooleanVar()
+        self.env_harmony = tk.BooleanVar()
+        ttk.Checkbutton(env_frame, text="iOS", variable=self.env_ios).pack(side=tk.LEFT)
+        ttk.Checkbutton(env_frame, text="Android", variable=self.env_android).pack(side=tk.LEFT)
+        ttk.Checkbutton(env_frame, text="Web", variable=self.env_web).pack(side=tk.LEFT)
+        ttk.Checkbutton(env_frame, text="鸿蒙", variable=self.env_harmony).pack(side=tk.LEFT)
 
-with col_template:
-    use_default = st.checkbox(
-        "📄 使用程序同目录下的 template.docx",
-        value=True,
-        help="勾选后将自动使用 EXE 同目录下的模板文件"
-    )
-    if not use_default:
-        template_file = st.file_uploader("手动上传报告模板", type=['docx'])
-    else:
-        template_file = None
+        # 测试类型
+        ttk.Label(frame2, text="测试类型：").grid(row=3, column=0, sticky=tk.W)
+        self.test_type_var = tk.StringVar(value="功能测试")
+        type_frame = ttk.Frame(frame2)
+        type_frame.grid(row=3, column=1, columnspan=3, sticky=tk.W)
+        for t in ["功能测试", "集成测试", "回归测试", "验收测试", "其他"]:
+            ttk.Radiobutton(type_frame, text=t, value=t, variable=self.test_type_var).pack(side=tk.LEFT, padx=5)
 
-with col_generate:
-    st.markdown("<br>", unsafe_allow_html=True)
-    generate_btn = st.button("🚀 生成并下载报告", type="primary", use_container_width=True)
+        # 测试结论
+        ttk.Label(frame2, text="测试结论：").grid(row=4, column=0, sticky=tk.NW)
+        self.conclusion_text = tk.Text(frame2, height=5, width=60)
+        self.conclusion_text.grid(row=4, column=1, columnspan=3, pady=5, sticky=tk.W)
 
-if generate_btn:
-    # 验证数据
-    if st.session_state.progress_data is None:
-        st.error("❌ 请先在步骤1中上传 Excel 文件并点击“提取数据”")
-    elif not project:
-        st.error("❌ 请填写项目名称")
-    else:
-        with st.spinner("正在生成报告..."):
-            # 准备上下文
-            context = {
-                'project': project,
-                'version': version,
-                'tester': tester,
-                'date': str(date),
-                'test_type': test_type,
-                'test_env': env_str,
-                'conclusion': conclusion,
-                'remark': remark,
-                'progress_table': st.session_state.progress_data or [],
-                'bug_stats': st.session_state.bug_stats or [],
-            }
-            
-            # 确定模板路径
-            if use_default:
-                if not os.path.exists(default_template_path):
-                    st.error("❌ 默认模板文件 template.docx 不存在，请与 EXE 放在同一目录，或手动上传模板。")
-                    st.stop()
-                template_path = default_template_path
-            elif template_file is not None:
-                temp_template = os.path.join(base, "temp_template.docx")
-                with open(temp_template, "wb") as f:
-                    f.write(template_file.getbuffer())
-                template_path = temp_template
-            else:
-                st.error("❌ 请上传模板或勾选使用默认模板。")
-                st.stop()
-            
+        # 备注
+        ttk.Label(frame2, text="备注：").grid(row=5, column=0, sticky=tk.NW)
+        self.remark_text = tk.Text(frame2, height=3, width=60)
+        self.remark_text.grid(row=5, column=1, columnspan=3, pady=5, sticky=tk.W)
+
+        # 步骤3：生成报告
+        frame3 = ttk.LabelFrame(main_frame, text="步骤3：生成报告", padding=10)
+        frame3.pack(fill=tk.X, pady=5)
+
+        ttk.Label(frame3, text="模板文件：").grid(row=0, column=0, sticky=tk.W)
+        self.template_path_var = tk.StringVar()
+        if os.path.exists(self.default_template):
+            self.template_path_var.set(self.default_template)
+        ttk.Entry(frame3, textvariable=self.template_path_var, width=50).grid(row=0, column=1, padx=5)
+        ttk.Button(frame3, text="浏览...", command=self.browse_template).grid(row=0, column=2)
+
+        ttk.Button(frame3, text="生成并下载报告", command=self.generate_report_thread).grid(row=1, column=1, pady=10)
+
+        # 状态栏
+        self.status_var = tk.StringVar(value="就绪")
+        status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
+        status_bar.pack(fill=tk.X, pady=(10,0))
+
+    def browse_excel(self):
+        path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx")])
+        if path:
+            self.excel_path.set(path)
             try:
-                output = generate_report(context, template_path)
-                st.success("✅ 报告生成成功！点击下方按钮下载")
-                st.download_button(
-                    "⬇️ 下载测试报告",
-                    data=output,
-                    file_name=f"测试报告_{project}_{date}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    use_container_width=True
-                )
+                xls = pd.ExcelFile(path)
+                self.sheet_names = xls.sheet_names
+                self.sheet_label.config(text=f"已读取页签：{', '.join(self.sheet_names)}")
+                self.progress_sheet_combo['values'] = self.sheet_names
+                if self.sheet_names:
+                    self.progress_sheet_combo.current(0)
+                # 读取所有页签备用
+                self.all_sheets = {name: pd.read_excel(xls, sheet_name=name) for name in self.sheet_names}
+                self.status_var.set(f"已加载文件：{os.path.basename(path)}")
             except Exception as e:
-                st.error(f"❌ 生成失败：{e}")
+                messagebox.showerror("错误", f"读取Excel失败：{e}")
 
-# 底部信息
-st.markdown("---")
-st.caption("💡 提示：所有数据均在本地处理，不会上传到任何服务器。")
+    def extract_data(self):
+        if not self.sheet_names:
+            messagebox.showwarning("警告", "请先选择Excel文件")
+            return
+        selected_sheet = self.progress_sheet_combo.get()
+        if not selected_sheet:
+            messagebox.showwarning("警告", "请选择进度页签")
+            return
+        try:
+            df_progress = self.all_sheets[selected_sheet]
+            self.progress_data = process_progress_sheet(df_progress)
+            # 处理Bug页签
+            self.bug_stats = []
+            for name in self.sheet_names:
+                if name == selected_sheet:
+                    continue
+                try:
+                    stats = process_bug_sheet(self.all_sheets[name], name)
+                    self.bug_stats.append(stats)
+                except Exception as e:
+                    self.status_var.set(f"跳过页签 {name}：{e}")
+            # 更新预览
+            self.progress_text.config(state=tk.NORMAL)
+            self.progress_text.delete(1.0, tk.END)
+            self.progress_text.insert(tk.END, f"进度数据提取完成，共 {len(self.progress_data)} 条记录\n")
+            self.progress_text.insert(tk.END, "Bug统计：\n")
+            for stat in self.bug_stats:
+                self.progress_text.insert(tk.END, f"  {stat['sheet_name']}: 总数{stat['total_bugs']} (S:{stat['s_count']} A:{stat['a_count']} B:{stat['b_count']} C:{stat['c_count']})\n")
+            self.progress_text.config(state=tk.DISABLED)
+            self.status_var.set("数据提取成功")
+        except Exception as e:
+            messagebox.showerror("错误", f"提取数据失败：{e}")
+
+    def browse_template(self):
+        path = filedialog.askopenfilename(filetypes=[("Word files", "*.docx")])
+        if path:
+            self.template_path_var.set(path)
+
+    def generate_report_thread(self):
+        # 在新线程中生成，避免界面卡顿
+        threading.Thread(target=self.generate_report, daemon=True).start()
+
+    def generate_report(self):
+        if self.progress_data is None:
+            messagebox.showwarning("警告", "请先提取数据")
+            return
+        project = self.project_var.get()
+        if not project:
+            messagebox.showwarning("警告", "请填写项目名称")
+            return
+
+        # 收集环境
+        envs = []
+        if self.env_ios.get(): envs.append("iOS")
+        if self.env_android.get(): envs.append("Android")
+        if self.env_web.get(): envs.append("Web")
+        if self.env_harmony.get(): envs.append("鸿蒙")
+        env_str = "、".join(envs) if envs else "未指定"
+
+        context = {
+            'project': project,
+            'version': self.version_var.get(),
+            'tester': self.tester_var.get(),
+            'date': self.date_var.get(),
+            'test_type': self.test_type_var.get(),
+            'test_env': env_str,
+            'conclusion': self.conclusion_text.get("1.0", tk.END).strip(),
+            'remark': self.remark_text.get("1.0", tk.END).strip(),
+            'progress_table': self.progress_data or [],
+            'bug_stats': self.bug_stats or [],
+        }
+
+        template_path = self.template_path_var.get()
+        if not template_path or not os.path.exists(template_path):
+            messagebox.showerror("错误", "请选择有效的模板文件")
+            return
+
+        try:
+            self.status_var.set("正在生成报告...")
+            output = generate_report(context, template_path)
+            # 弹出保存对话框
+            save_path = filedialog.asksaveasfilename(
+                defaultextension=".docx",
+                filetypes=[("Word files", "*.docx")],
+                initialfile=f"测试报告_{project}_{self.date_var.get()}.docx"
+            )
+            if save_path:
+                with open(save_path, "wb") as f:
+                    f.write(output.getbuffer())
+                self.status_var.set(f"报告已保存：{os.path.basename(save_path)}")
+                messagebox.showinfo("成功", f"报告已生成并保存到：\n{save_path}")
+            else:
+                self.status_var.set("取消保存")
+        except Exception as e:
+            messagebox.showerror("错误", f"生成报告失败：{e}")
+            self.status_var.set("生成失败")
+
+# ---------- 启动 ----------
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = ReportApp(root)
+    root.mainloop()
