@@ -11,6 +11,11 @@ a = Analysis(
         'docx',
         'docxtpl',
         'lxml',
+        'tkinter',
+        'tkinter.ttk',
+        'tkinter.filedialog',
+        'tkinter.messagebox',
+        'tkinter.scrolledtext',
     ],
     hookspath=[],
     hooksconfig={},
@@ -33,5 +38,5 @@ exe = EXE(
     strip=False,
     upx=True,
     runtime_tmpdir=None,
-    console=False,   # 不显示控制台，直接显示窗口
+    console=False,
 )
