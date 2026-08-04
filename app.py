@@ -305,7 +305,10 @@ class ReportApp:
             self.status_var.set("生成失败")
 
 # ---------- 启动 ----------
-if __name__ == "__main__":
+def main():
     root = tk.Tk()
     app = ReportApp(root)
     root.mainloop()
+
+if __name__ == "__main__":
+    main()
